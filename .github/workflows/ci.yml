@@ -1,0 +1,53 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install (CPU torch)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check .
+      - name: Tests (scheduler, allocator, paged attention vs Hugging Face, engine, server)
+        run: pytest
+      - name: Offline benchmark sanity run (tiny model)
+        run: python bench/offline.py --model tiny --num-requests 8 --prompt-len 16 --output-len 8 16 --max-num-seqs 1 4
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: pagedbatch:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test the server
+        run: |
+          set -euo pipefail
+          docker run -d --name pb -p 8000:8000 pagedbatch:ci
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/health && break; sleep 1; done
+          curl -fsS http://127.0.0.1:8000/v1/completions -H 'content-type: application/json' \
+            -d '{"prompt":"hello","max_tokens":8,"temperature":0}' | tee out.json
+          grep -q '"finish_reason"' out.json
+          curl -fsS http://127.0.0.1:8000/metrics | grep -q pagedbatch_generated_tokens_total
+          docker logs pb
+          docker rm -f pb
