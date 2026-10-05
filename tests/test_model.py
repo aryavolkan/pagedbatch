@@ -18,16 +18,16 @@ def test_forward_batch_indexing():
     assert batch.query_start_loc.tolist() == [0, 3, 4]
     assert batch.context_lens.tolist() == [3, 6]
     assert batch.last_token_index.tolist() == [2, 3]
-    # kv_slot_table: seq 1 positions 0..5 -> block 2 slots 8..11 then block 7 slots 28, 29
-    assert batch.kv_slot_table[1].tolist() == [8, 9, 10, 11, 28, 29]
-    assert batch.kv_slot_table[0, :3].tolist() == [20, 21, 22]
-    mask = batch.attn_mask[:, 0]  # [B, Q_max, L_max]
-    # seq 0: causal over its 3 queries
-    assert mask[0, :3, :3].tolist() == [[True, False, False], [True, True, False], [True, True, True]]
-    # seq 1: its single query (position 5) sees all 6 keys
-    assert mask[1, 0, :6].tolist() == [True] * 6
-    assert batch.valid_query.tolist() == [[True, True, True], [True, False, False]]
-    assert batch.pad_index[0].tolist() == [0, 1, 2] and batch.pad_index[1, 0].item() == 3
+    decode, prefill = batch.groups  # decodes first, then prefill chunks
+    # decode group = seq 1: positions 0..5 -> block 2 slots 8..11 then block 7 slots 28, 29;
+    # its single query (position 5) sees all 6 keys; it owns flat row 3.
+    assert decode.kv_slot_table.tolist() == [[8, 9, 10, 11, 28, 29]]
+    assert decode.attn_mask[0, 0].tolist() == [[True] * 6]
+    assert decode.valid_query.tolist() == [[True]] and decode.rows.tolist() == [3]
+    # prefill group = seq 0: three queries, causal, flat rows 0..2, no padding needed.
+    assert prefill.kv_slot_table.tolist() == [[20, 21, 22]]
+    assert prefill.attn_mask[0, 0].tolist() == [[True, False, False], [True, True, False], [True, True, True]]
+    assert prefill.valid_query.tolist() == [[True, True, True]] and prefill.rows.tolist() == [0, 1, 2]
 
 
 def test_token_by_token_prefill_matches_one_shot_prefill(engine_factory):

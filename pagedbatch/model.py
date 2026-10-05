@@ -11,6 +11,10 @@ needed slots are gathered into a padded ``[B, L_max, heads, dim]`` tensor and
 handed to ``scaled_dot_product_attention`` with a causal-plus-padding mask.
 Production engines fuse the gather into a custom kernel; the data layout and
 the block-table indirection are the same.
+
+Sequences are attended in two groups, decodes (one query each) and prefill
+chunks, because padding every query to the longest chunk in the step made a
+mixed step do up to ``max_num_seqs`` times the attention work it needed.
 """
 
 from __future__ import annotations
@@ -23,6 +27,22 @@ from torch import nn
 
 from .config import ModelConfig
 from .kv_cache import KVCache
+
+
+@dataclass
+class AttentionGroup:
+    """Sequences attended together: decodes (Q_max = 1) or prefill chunks."""
+
+    kv_slot_table: torch.Tensor
+    """[b, L_max] physical slot of every cached position per sequence (padding: 0)."""
+    attn_mask: torch.Tensor
+    """[b, 1, Q_max, L_max] boolean; True where query may attend key."""
+    pad_index: torch.Tensor
+    """[b, Q_max] flat row index of each padded query position."""
+    valid_query: torch.Tensor
+    """[b, Q_max] True for real (non-padding) query positions."""
+    rows: torch.Tensor
+    """[n] flat rows this group covers, in the order ``valid_query`` yields them."""
 
 
 @dataclass
@@ -39,16 +59,10 @@ class ForwardBatch:
     """[B+1] cumulative query lengths; sequence b owns rows [qsl[b], qsl[b+1])."""
     context_lens: torch.Tensor
     """[B] total tokens in the cache per sequence after this step."""
-    kv_slot_table: torch.Tensor
-    """[B, L_max] physical slot of every cached position per sequence (padding: 0)."""
-    attn_mask: torch.Tensor
-    """[B, 1, Q_max, L_max] boolean; True where query may attend key."""
-    pad_index: torch.Tensor
-    """[B, Q_max] flat row index of each padded query position."""
-    valid_query: torch.Tensor
-    """[B, Q_max] True for real (non-padding) query positions."""
     last_token_index: torch.Tensor
     """[B] flat row of each sequence's final new token (its logits feed sampling)."""
+    groups: list[AttentionGroup]
+    """Decode group first (if any), then the prefill group (if any)."""
 
     @property
     def num_tokens(self) -> int:
@@ -79,25 +93,15 @@ class ForwardBatch:
         qsl = torch.zeros(num_seqs + 1, dtype=torch.long)
         qsl[1:] = torch.cumsum(torch.tensor(q_lens), 0)
         context_lens = torch.tensor([s + n for s, n in zip(start_positions, q_lens, strict=True)], dtype=torch.long)
-
-        max_blocks = max(len(b) for b in block_tables)
-        bt = torch.zeros(num_seqs, max_blocks, dtype=torch.long)
-        for i, blocks in enumerate(block_tables):
-            bt[i, : len(blocks)] = torch.tensor(blocks, dtype=torch.long)
-        l_max = int(context_lens.max())
-        key_pos = torch.arange(l_max, dtype=torch.long)
-        blk = (key_pos // block_size).clamp(max=max_blocks - 1).unsqueeze(0).expand(num_seqs, l_max)
-        kv_slot_table = bt.gather(1, blk) * block_size + (key_pos % block_size).unsqueeze(0)
-
-        q_max = max(q_lens)
-        q_idx = torch.arange(q_max, dtype=torch.long)
-        q_lens_t = torch.tensor(q_lens, dtype=torch.long)
-        valid = q_idx.unsqueeze(0) < q_lens_t.unsqueeze(1)
-        q_pos = (context_lens - q_lens_t).unsqueeze(1) + q_idx.unsqueeze(0)  # [B, Q_max]
-        attn_mask = key_pos.view(1, 1, l_max) <= q_pos.unsqueeze(2)  # causal, incl. the token itself
-        pad_index = (qsl[:-1].unsqueeze(1) + q_idx.unsqueeze(0)).clamp(max=total - 1)
         last_token_index = qsl[1:] - 1
 
+        decode = [i for i, n in enumerate(q_lens) if n == 1]
+        prefill = [i for i, n in enumerate(q_lens) if n > 1]
+        groups = [
+            ForwardBatch._group(idx, q_lens, qsl, context_lens, block_tables, block_size, total)
+            for idx in (decode, prefill)
+            if idx
+        ]
         to = lambda t: t.to(device)  # noqa: E731
         return ForwardBatch(
             input_ids=to(input_ids),
@@ -105,12 +109,43 @@ class ForwardBatch:
             slot_mapping=to(slot_mapping),
             query_start_loc=to(qsl),
             context_lens=to(context_lens),
-            kv_slot_table=to(kv_slot_table),
-            attn_mask=to(attn_mask.unsqueeze(1)),
-            pad_index=to(pad_index),
-            valid_query=to(valid),
             last_token_index=to(last_token_index),
+            groups=[
+                AttentionGroup(to(g.kv_slot_table), to(g.attn_mask), to(g.pad_index), to(g.valid_query), to(g.rows)) for g in groups
+            ],
         )
+
+    @staticmethod
+    def _group(
+        idx: list[int],
+        q_lens: list[int],
+        qsl: torch.Tensor,
+        context_lens: torch.Tensor,
+        block_tables: list[list[int]],
+        block_size: int,
+        total: int,
+    ) -> AttentionGroup:
+        b = len(idx)
+        ctx = context_lens[idx]
+        q_lens_t = torch.tensor([q_lens[i] for i in idx], dtype=torch.long)
+        max_blocks = max(len(block_tables[i]) for i in idx)
+        bt = torch.zeros(b, max_blocks, dtype=torch.long)
+        for row, i in enumerate(idx):
+            bt[row, : len(block_tables[i])] = torch.tensor(block_tables[i], dtype=torch.long)
+        l_max = int(ctx.max())
+        key_pos = torch.arange(l_max, dtype=torch.long)
+        blk = (key_pos // block_size).clamp(max=max_blocks - 1).unsqueeze(0).expand(b, l_max)
+        kv_slot_table = bt.gather(1, blk) * block_size + (key_pos % block_size).unsqueeze(0)
+
+        q_max = int(q_lens_t.max())
+        q_idx = torch.arange(q_max, dtype=torch.long)
+        valid = q_idx.unsqueeze(0) < q_lens_t.unsqueeze(1)
+        q_pos = (ctx - q_lens_t).unsqueeze(1) + q_idx.unsqueeze(0)  # [b, Q_max]
+        attn_mask = (key_pos.view(1, 1, l_max) <= q_pos.unsqueeze(2)).unsqueeze(1)  # causal, incl. the token itself
+        starts = qsl[:-1][idx]
+        pad_index = (starts.unsqueeze(1) + q_idx.unsqueeze(0)).clamp(max=total - 1)
+        rows = pad_index[valid]
+        return AttentionGroup(kv_slot_table, attn_mask, pad_index, valid, rows)
 
 
 class RMSNorm(nn.Module):
@@ -174,17 +209,18 @@ class Attention(nn.Module):
         # context (new tokens included) through its block table.
         k_cache.index_copy_(0, batch.slot_mapping, k)
         v_cache.index_copy_(0, batch.slot_mapping, v)
-        keys = k_cache[batch.kv_slot_table]  # [B, L_max, Hkv, D]
-        values = v_cache[batch.kv_slot_table]
-        if self.n_rep > 1:  # grouped-query attention: share each KV head across n_rep query heads
-            keys = keys.repeat_interleave(self.n_rep, dim=2)
-            values = values.repeat_interleave(self.n_rep, dim=2)
-        keys = keys.transpose(1, 2)  # [B, H, L_max, D]
-        values = values.transpose(1, 2)
-
-        queries = q[batch.pad_index].transpose(1, 2)  # [B, H, Q_max, D]
-        out = F.scaled_dot_product_attention(queries, keys, values, attn_mask=batch.attn_mask)
-        out = out.transpose(1, 2)[batch.valid_query]  # back to the flat batch: [T, H, D]
+        out = q.new_empty(t, self.num_heads, self.head_dim)
+        for g in batch.groups:
+            keys = k_cache[g.kv_slot_table]  # [b, L_max, Hkv, D]
+            values = v_cache[g.kv_slot_table]
+            if self.n_rep > 1:  # grouped-query attention: share each KV head across n_rep query heads
+                keys = keys.repeat_interleave(self.n_rep, dim=2)
+                values = values.repeat_interleave(self.n_rep, dim=2)
+            keys = keys.transpose(1, 2)  # [b, H, L_max, D]
+            values = values.transpose(1, 2)
+            queries = q[g.pad_index].transpose(1, 2)  # [b, H, Q_max, D]
+            o = F.scaled_dot_product_attention(queries, keys, values, attn_mask=g.attn_mask)
+            out[g.rows] = o.transpose(1, 2)[g.valid_query]  # back to the flat batch rows
         return self.o_proj(out.reshape(t, self.num_heads * self.head_dim))
 
 
