@@ -1,0 +1,42 @@
+{
+  "env": {
+    "model": "smollm2-135m-random",
+    "layers": 30,
+    "hidden": 576,
+    "kv_heads": 3,
+    "machine": "x86_64",
+    "cpu_count": 4,
+    "torch": "2.14.1+cu130",
+    "torch_threads": 4,
+    "num_requests": 32,
+    "prompt_len": 128,
+    "output_len": [
+      16,
+      128
+    ],
+    "block_size": 16,
+    "kv_cache_mb": 96,
+    "max_model_len": 2048
+  },
+  "rows": [
+    {
+      "mode": "continuous",
+      "max_num_seqs": 32,
+      "seconds": 40.914,
+      "output_tokens": 2235,
+      "prompt_tokens": 4096,
+      "output_tok_s": 54.6,
+      "total_tok_s": 154.7,
+      "steps": 241,
+      "step_ms_mean": 169.76,
+      "step_ms_p99": 631.16,
+      "ttft_ms_mean": 12587.2,
+      "ttft_ms_p99": 29323.1,
+      "preemptions": 10,
+      "peak_running": 15,
+      "peak_blocks": 136,
+      "kv_paged_peak_mib": 95.62,
+      "kv_reserve_max_len_mib": 1350.0
+    }
+  ]
+}
