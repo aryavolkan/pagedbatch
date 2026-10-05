@@ -5,7 +5,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 
 A minimal continuous-batching LLM inference server with a paged KV cache, in
-about 1,500 lines of PyTorch. It makes the serving-side ideas behind vLLM
+under 2,000 lines of PyTorch. It makes the serving-side ideas behind vLLM
 concrete and testable: a block allocator with per-sequence block tables, a
 scheduler that mixes prefill chunks and decode steps in one forward pass,
 preemption by recomputation when the cache runs out, and an OpenAI-compatible
@@ -94,7 +94,40 @@ sanity run and a Docker build with an HTTP smoke test).
 
 ## Results
 
-<!-- RESULTS -->
+Measured on a 4-vCPU x86_64 container (PyTorch 2.14.1, float32, 4 threads) with the SmolLM2-135M shape and random weights: 30 layers, hidden 576, 3 KV heads. Throughput depends on shapes, not weight values, so the numbers carry over to the real checkpoint; text quality obviously does not. Workload: 32 requests, 128-token prompts, output lengths uniform in 16–128 tokens with `ignore_eos`, block size 16, a 256 MiB cache. Reproduce with the commands in [`bench/offline.py`](bench/offline.py) and [`bench/load.py`](bench/load.py); raw JSON in [`bench/results/`](bench/results/).
+
+**Batching scales decode throughput; continuous admission keeps the batch full.** All requests are queued at once, so the offline run measures throughput, not latency.
+
+| max_num_seqs | continuous: output tok/s | vs. batch 1 | static batches: output tok/s | step ms mean / p99 | peak KV, paged | KV if `max_model_len` were reserved per sequence |
+|---|---|---|---|---|---|---|
+| 1 | **23.7** | 1.0× | 23.7 | 42.16 / 164.82 | 11.25 MiB | 90.0 MiB |
+| 4 | **55.6** | 2.3× | 48.7 | 68.4 / 212.76 | 36.56 MiB | 360.0 MiB |
+| 8 | **78.0** | 3.3× | 68.2 | 86.59 / 260.86 | 71.72 MiB | 720.0 MiB |
+| 16 | **113.6** | 4.8× | 98.5 | 91.06 / 385.78 | 137.11 MiB | 1440.0 MiB |
+| 32 | **131.5** | 5.5× | 131.7 | 135.94 / 486.81 | 205.31 MiB | 2880.0 MiB |
+
+At 32 concurrent sequences the paged cache peaks at 205.31 MiB; reserving `max_model_len` (2048 tokens) per running sequence would need 2880.0 MiB, 14× more, for the same work.
+
+**Under memory pressure** (same 32 requests, `--kv-cache-mb 96`: a 136-block pool, fully used at peak): 10 preemptions, each a recompute from scratch, and throughput of 54.6 tok/s against 131.5 with the larger cache. The engine degrades instead of failing, and the test suite checks that preempted requests produce exactly the tokens they would have without preemption.
+
+**Decode and prefill attend in separate groups.** The first version padded every sequence's queries to the longest prefill chunk in the step, so a mixed step did up to `max_num_seqs` times the attention work it needed. Grouping fixed that; the before/after on the same workload (`bench/results/offline_padded_attention.json` vs `offline.json`):
+
+| max_num_seqs | padded queries: tok/s | grouped: tok/s | change |
+|---|---|---|---|
+| 1 | 25.7 | **23.7** | -8% (one sequence has one group either way: run-to-run variance) |
+| 4 | 53.7 | **55.6** | +4% |
+| 8 | 73.4 | **78.0** | +6% |
+| 16 | 87.2 | **113.6** | +30% |
+| 32 | 118.3 | **131.5** | +11% |
+
+**Over HTTP** (`bench/load.py`, streaming `/v1/completions`, 128-token prompts, 64 output tokens each, server at `--max-num-seqs 16`):
+
+| in flight | requests | output tok/s | TTFT p50 / p99 ms | time per output token p50 / p99 ms | end-to-end p50 / p99 ms |
+|---|---|---|---|---|---|
+| 1 | 16 | **13.7** | 255.2 / 290.0 | 70.5 / 75.4 | 4726.1 / 4993.5 |
+| 16 | 64 | **50.1** | 1402.1 / 3588.6 | 301.2 / 314.1 | 20225.3 / 22514.2 |
+
+The load generator ran on the same four cores as the server, so these numbers sit below the offline engine throughput. Per-token latency rises with the batch because the cores are shared sixteen ways; aggregate throughput rises because the weights are read once per step for all sixteen sequences. On a GPU, where decode is bound by memory bandwidth rather than compute, the same trade is far steeper, which is why continuous batching is the default there. Choosing the operating point within a fixed memory budget is the job of an inference scheduler.
 
 ## Design notes
 
