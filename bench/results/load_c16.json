@@ -1,0 +1,29 @@
+{
+  "config": {
+    "url": "http://127.0.0.1:8012",
+    "num_requests": 64,
+    "concurrency": 16,
+    "rate": null,
+    "prompt_len": 128,
+    "max_tokens": 64,
+    "temperature": 0.0
+  },
+  "wall_seconds": 79.292,
+  "requests_per_s": 0.81,
+  "output_tok_s": 51.7,
+  "ttft_ms": {
+    "p50": 1622.0,
+    "p90": 2475.3,
+    "p99": 3218.3
+  },
+  "tpot_ms": {
+    "p50": 284.2,
+    "p90": 300.0,
+    "p99": 302.4,
+    "mean": 285.8
+  },
+  "e2e_ms": {
+    "p50": 19600.3,
+    "p99": 22270.6
+  }
+}
