@@ -5,7 +5,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 
 A minimal continuous-batching LLM inference server with a paged KV cache, in
-about 1,500 lines of PyTorch. It makes the serving-side ideas behind vLLM
+under 2,000 lines of PyTorch. It makes the serving-side ideas behind vLLM
 concrete and testable: a block allocator with per-sequence block tables, a
 scheduler that mixes prefill chunks and decode steps in one forward pass,
 preemption by recomputation when the cache runs out, and an OpenAI-compatible
@@ -94,61 +94,103 @@ sanity run and a Docker build with an HTTP smoke test).
 
 ## Results
 
-All numbers below are from a 4-vCPU `x86_64` GitHub Actions runner (CPU-only,
-`float32`) using the real SmolLM2-135M architecture with random weights. They
-are meant to show the *behavior* of continuous batching and paged caching, not
-to compete with GPU-optimized engines.
+All numbers below were measured on a 4-vCPU `x86_64` cloud container (CPU only,
+`float32`, PyTorch 2.14.1) with the real SmolLM2-135M architecture and random
+weights: 30 layers, hidden 576, 3 KV heads. Throughput depends on the shapes,
+not on the weight values, so the numbers carry over to the real checkpoint; text
+quality does not. They show the *behavior* of continuous batching and a paged
+cache, not a contest with GPU engines. Raw JSON for every table is in
+[`bench/results/`](bench/results/).
 
 ### Offline engine benchmark
 
-`bench/offline.py --model smollm2-135m-random --num-requests 32 --prompt-len 128 --output-len 16 128 --kv-cache-mb 256`
+`bench/offline.py --model smollm2-135m-random --num-requests 32 --prompt-len 128 --output-len 16 128 --max-num-seqs 1 4 8 16 32 --static --kv-cache-mb 256`
 
-| mode | max_num_seqs | output tok/s | total tok/s | step ms (mean / p99) | TTFT p99 ms | preemptions | peak KV paged MiB | reserve-max-len MiB |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| continuous | 1 | 25.7 | 72.7 | 38.96 / 149.06 | 84,464 | 0 | 11.25 | 90.0 |
-| static | 1 | 25.0 | 70.8 | 40.00 / 156.05 | 416 | 0 | 11.25 | 90.0 |
-| continuous | 4 | 53.7 | 152.2 | 70.72 / 257.40 | 36,210 | 0 | 36.56 | 360.0 |
-| static | 4 | 45.8 | 129.7 | 55.65 / 291.81 | 869 | 0 | 39.38 | 360.0 |
-| continuous | 8 | 73.4 | 208.0 | 91.94 / 328.45 | 23,568 | 0 | 71.72 | 720.0 |
-| static | 8 | 69.0 | 195.5 | 68.59 / 436.05 | 1,007 | 0 | 67.50 | 720.0 |
-| continuous | 16 | 87.2 | 246.9 | 118.71 / 468.29 | 16,994 | 0 | 137.11 | 1,440.0 |
-| static | 16 | 90.8 | 257.1 | 100.47 / 633.98 | 2,631 | 0 | 109.69 | 1,440.0 |
-| continuous | 32 | 118.3 | 335.1 | 151.11 / 702.98 | 4,977 | 0 | 205.31 | 2,880.0 |
-| static | 32 | 120.9 | 342.5 | 147.87 / 619.35 | 4,584 | 0 | 205.31 | 2,880.0 |
+32 requests, 128-token prompts, output lengths uniform in 16–128 tokens with
+`ignore_eos`, block size 16. All requests are queued at once, so this run measures
+throughput; latency is measured over HTTP below.
+
+| mode | max_num_seqs | output tok/s | total tok/s | step ms (mean / p99) | preemptions | peak KV paged MiB | reserve-max-len MiB |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| continuous | 1 | 23.7 | 67.2 | 42.16 / 164.82 | 0 | 11.25 | 90.0 |
+| static | 1 | 23.7 | 67.2 | 42.16 / 148.96 | 0 | 11.25 | 90.0 |
+| continuous | 4 | 55.6 | 157.4 | 68.40 / 212.76 | 0 | 36.56 | 360.0 |
+| static | 4 | 48.7 | 138.0 | 52.30 / 280.75 | 0 | 39.38 | 360.0 |
+| continuous | 8 | 78.0 | 220.9 | 86.59 / 260.86 | 0 | 71.72 | 720.0 |
+| static | 8 | 68.2 | 193.1 | 69.45 / 421.11 | 0 | 67.50 | 720.0 |
+| continuous | 16 | 113.6 | 321.8 | 91.06 / 385.78 | 0 | 137.11 | 1,440.0 |
+| static | 16 | 98.5 | 279.1 | 92.56 / 421.01 | 0 | 109.69 | 1,440.0 |
+| continuous | 32 | 131.5 | 372.5 | 135.94 / 486.81 | 0 | 205.31 | 2,880.0 |
+| static | 32 | 131.7 | 373.0 | 135.76 / 467.97 | 0 | 205.31 | 2,880.0 |
 
 Takeaways:
 
-- **Continuous batching keeps the batch full.** At `max_num_seqs=4` it beats
-  static batching by 17 % on output tokens/s; the gap opens where shorter
-  sequences finish early and are replaced instead of waiting for the longest
-  request in each fixed group.
-- **Paged cache saves memory.** Even at the largest batch size, peak KV usage
-  is 205 MiB. Reserving `max_model_len` (2048 tokens) per running sequence
-  would have required 2,880 MiB — a **14×** difference.
-- **TTFT is the trade-off.** Because the engine mixes decode steps and prefill
-  chunks, a newly admitted request can wait behind running decodes. The p99
-  TTFT falls as `max_num_seqs` rises because more decode tokens are amortized
-  per step, but users who need strict first-token latency can cap
-  `max_num_batched_tokens` or use a dedicated prefill pass.
+- **Batching scales throughput.** From batch 1 to 32, output tokens/s rise 5.5×,
+  because the weights are read once per step for every sequence in the batch.
+- **Continuous batching keeps the batch full.** It beats static batching by 14 % at
+  `max_num_seqs=4` and by 15 % at 16: shorter sequences finish early and are replaced
+  at once instead of waiting for the longest request in each fixed group. At 32 the
+  whole workload is one batch either way.
+- **Paged cache saves memory.** Even at the largest batch size, peak KV usage is
+  205 MiB. Reserving `max_model_len` (2048 tokens) per running sequence
+  would have required 2,880.0 MiB — a **14×** difference.
+- **First-token latency is the trade-off.** A newly admitted request waits behind the
+  running decodes, and a prefill chunk slows the decode step it joins. Users who need
+  strict first-token latency can cap `max_num_batched_tokens` or run a dedicated
+  prefill pass; the HTTP table below has the measured latencies.
+
+### Under memory pressure
+
+Same 32 requests with `--kv-cache-mb 96` (a 136-block pool, fully used at peak):
+10 preemptions, each a recompute from scratch, and 54.6 output tok/s against
+131.5 with the larger cache. The engine degrades instead of failing, and
+`tests/test_engine.py` checks that preempted requests produce exactly the tokens they
+would have produced without preemption.
+
+### Decode and prefill attend in separate groups
+
+The first version padded every sequence's queries to the longest prefill chunk in the
+step, so a mixed step did up to `max_num_seqs` times the attention work it needed.
+Grouping (#1) fixed that. Before/after on the same workload
+(`bench/results/offline_padded_attention.json` vs `offline.json`):
+
+| max_num_seqs | padded queries: tok/s | grouped: tok/s | change |
+|---|---:|---:|---:|
+| 1 | 25.7 | 23.7 | -8 % (one group either way: run-to-run variance) |
+| 4 | 53.7 | 55.6 | +4 % |
+| 8 | 73.4 | 78.0 | +6 % |
+| 16 | 87.2 | 113.6 | +30 % |
+| 32 | 118.3 | 131.5 | +11 % |
 
 ### HTTP load test
 
 `pagedbatch serve --model smollm2-135m-random --max-num-seqs 16`, then
-`bench/load.py --num-requests 64 --concurrency 16 --prompt-len 128 --max-tokens 64`.
+`bench/load.py --num-requests 64 --concurrency 16 --prompt-len 128 --max-tokens 64`
+and the same with `--num-requests 16 --concurrency 1`. The load generator shared the
+server's four cores, so these numbers sit below the offline engine throughput.
 
-| metric | value |
-|---|---:|
-| throughput | 0.81 req/s, 51.7 output tok/s |
-| TTFT p50 / p90 / p99 | 1,622 / 2,475 / 3,218 ms |
-| TPOT p50 / p90 / p99 | 284 / 300 / 302 ms |
-| E2E p50 / p99 | 19,600 / 22,271 ms |
+| metric | 1 in flight | 16 in flight |
+|---|---:|---:|
+| throughput | 0.21 req/s, 13.7 output tok/s | 0.78 req/s, 50.1 output tok/s |
+| TTFT p50 / p90 / p99 | 255.2 / 284.9 / 290.0 ms | 1,402.1 / 2,752.6 / 3,588.6 ms |
+| TPOT p50 / p90 / p99 | 70.5 / 73.7 / 75.4 ms | 301.2 / 307.6 / 314.1 ms |
+| E2E p50 / p99 | 4,726.1 / 4,993.5 ms | 20,225.3 / 22,514.2 ms |
+
+Per-token latency rises with the batch because the cores are shared sixteen ways;
+aggregate throughput rises because the weights are read once per step for all
+sixteen sequences. On a GPU, where decode is bound by memory bandwidth rather than
+compute, the same trade is far steeper, which is why continuous batching is the
+default there. Choosing the operating point within a fixed memory budget is the job
+of an inference scheduler.
 
 ### Correctness
 
-`tests/test_hf_equivalence.py` runs greedy generation on
-`HuggingFaceTB/SmolLM2-135M-Instruct` through both pagedbatch and Hugging Face
-`transformers` with chunked prefill, 2-token blocks and batched requests. The
-output token sequences match exactly.
+`tests/test_hf_equivalence.py` builds a Llama model with random weights in Hugging
+Face `transformers`, saves it as a checkpoint, loads that checkpoint through
+pagedbatch's own loader, and runs greedy generation through both engines with
+2-token blocks, chunked prefill and batched requests. The output token sequences
+match exactly. The test needs no download, so CI runs it on every push; the same
+loader reads `HuggingFaceTB/SmolLM2-135M-Instruct` for real text.
 
 ## Design notes
 

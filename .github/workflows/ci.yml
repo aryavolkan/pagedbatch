@@ -44,10 +44,14 @@ jobs:
         run: |
           set -euo pipefail
           docker run -d --name pb -p 8000:8000 pagedbatch:ci
-          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/health && break; sleep 1; done
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/health && echo && break; sleep 1; done
+          # Write responses to files before grepping: with pipefail, `curl | grep -q`
+          # fails whenever grep matches and closes the pipe before curl finishes.
           curl -fsS http://127.0.0.1:8000/v1/completions -H 'content-type: application/json' \
-            -d '{"prompt":"hello","max_tokens":8,"temperature":0}' | tee out.json
+            -d '{"prompt":"hello","max_tokens":8,"temperature":0}' > out.json
+          cat out.json; echo
           grep -q '"finish_reason"' out.json
-          curl -fsS http://127.0.0.1:8000/metrics | grep -q pagedbatch_generated_tokens_total
+          curl -fsS http://127.0.0.1:8000/metrics > metrics.txt
+          grep -q pagedbatch_generated_tokens_total metrics.txt
           docker logs pb
           docker rm -f pb
