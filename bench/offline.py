@@ -104,22 +104,51 @@ def main() -> int:
     requests = make_requests(a.num_requests, a.prompt_len, a.output_len, a.seed)
     rows = []
     for n in a.max_num_seqs:
-        for static in ([False, True] if a.static else [False]):
-            engine = LLMEngine(model, cfg, tok, EngineConfig(block_size=a.block_size, kv_cache_bytes=a.kv_cache_mb * 2**20, max_num_seqs=n,
-                                                            max_num_batched_tokens=a.max_num_batched_tokens, max_model_len=a.max_model_len, seed=a.seed))
+        for static in [False, True] if a.static else [False]:
+            engine = LLMEngine(
+                model,
+                cfg,
+                tok,
+                EngineConfig(
+                    block_size=a.block_size,
+                    kv_cache_bytes=a.kv_cache_mb * 2**20,
+                    max_num_seqs=n,
+                    max_num_batched_tokens=a.max_num_batched_tokens,
+                    max_model_len=a.max_model_len,
+                    seed=a.seed,
+                ),
+            )
             row = run(engine, requests, static)
             rows.append(row)
-            print(f"{row['mode']:>10} max_num_seqs={n:<3} {row['output_tok_s']:>7.1f} out tok/s  {row['step_ms_mean']:>7.2f} ms/step  "
-                  f"ttft p99 {row['ttft_ms_p99']:>7} ms  preempt={row['preemptions']}  peak blocks={row['peak_blocks']}", file=sys.stderr)
+            print(
+                f"{row['mode']:>10} max_num_seqs={n:<3} {row['output_tok_s']:>7.1f} out tok/s  {row['step_ms_mean']:>7.2f} ms/step  "
+                f"ttft p99 {row['ttft_ms_p99']:>7} ms  preempt={row['preemptions']}  peak blocks={row['peak_blocks']}",
+                file=sys.stderr,
+            )
 
-    env = {"model": a.model, "layers": cfg.num_layers, "hidden": cfg.hidden_size, "kv_heads": cfg.num_kv_heads, "machine": platform.machine(),
-           "cpu_count": os.cpu_count(), "torch": torch.__version__, "torch_threads": torch.get_num_threads(), "num_requests": a.num_requests,
-           "prompt_len": a.prompt_len, "output_len": a.output_len, "block_size": a.block_size, "kv_cache_mb": a.kv_cache_mb, "max_model_len": a.max_model_len}
+    env = {
+        "model": a.model,
+        "layers": cfg.num_layers,
+        "hidden": cfg.hidden_size,
+        "kv_heads": cfg.num_kv_heads,
+        "machine": platform.machine(),
+        "cpu_count": os.cpu_count(),
+        "torch": torch.__version__,
+        "torch_threads": torch.get_num_threads(),
+        "num_requests": a.num_requests,
+        "prompt_len": a.prompt_len,
+        "output_len": a.output_len,
+        "block_size": a.block_size,
+        "kv_cache_mb": a.kv_cache_mb,
+        "max_model_len": a.max_model_len,
+    }
     print("\n| mode | max_num_seqs | output tok/s | step ms (mean / p99) | TTFT p99 ms | preemptions | peak KV paged MiB | reserve-max-len MiB |")
     print("|---|---|---|---|---|---|---|---|")
     for r in rows:
-        print(f"| {r['mode']} | {r['max_num_seqs']} | {r['output_tok_s']} | {r['step_ms_mean']} / {r['step_ms_p99']} | {r['ttft_ms_p99']} | "
-              f"{r['preemptions']} | {r['kv_paged_peak_mib']} | {r['kv_reserve_max_len_mib']} |")
+        print(
+            f"| {r['mode']} | {r['max_num_seqs']} | {r['output_tok_s']} | {r['step_ms_mean']} / {r['step_ms_p99']} | {r['ttft_ms_p99']} | "
+            f"{r['preemptions']} | {r['kv_paged_peak_mib']} | {r['kv_reserve_max_len_mib']} |"
+        )
     if a.json:
         a.json.parent.mkdir(parents=True, exist_ok=True)
         a.json.write_text(json.dumps({"env": env, "rows": rows}, indent=2))

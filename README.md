@@ -4,17 +4,28 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 
-A minimal continuous-batching LLM inference server with a paged KV cache, in
-under 2,000 lines of PyTorch. It makes the serving-side ideas behind vLLM
-concrete and testable: a block allocator with per-sequence block tables, a
-scheduler that mixes prefill chunks and decode steps in one forward pass,
-preemption by recomputation when the cache runs out, and an OpenAI-compatible
-API with streaming and Prometheus metrics. No custom kernels: every mechanism
-is readable Python.
+**A minimal continuous-batching LLM inference server with a paged KV cache.**
+It implements the core serving ideas behind vLLM — block-paged attention,
+continuous batching, chunked prefill, recompute preemption, and an
+OpenAI-compatible API — in under 2,000 lines of readable PyTorch with no custom
+kernels.
 
+This repo is a **reference implementation for inference infrastructure**: every
+scheduling and memory-management decision is explicit, tested, and benchmarked.
 Correctness is pinned to Hugging Face `transformers`: on the same Llama weights
-the engine's greedy output is identical token for token with 2-token blocks,
-chunked prefill and batched requests ([`tests/test_hf_equivalence.py`](tests/test_hf_equivalence.py)).
+pagedbatch's greedy output matches token-for-token with chunked prefill, 2-token
+blocks, and batched requests ([`tests/test_hf_equivalence.py`](tests/test_hf_equivalence.py)).
+
+## At a glance
+
+| | |
+|---|---|
+| **Scheduling** | Continuous batching with chunked prefill: decode steps and prefill chunks share one flat forward pass |
+| **Memory** | Paged KV cache with block allocator, per-sequence block tables, and recompute preemption when the cache fills |
+| **Model** | Llama-family decoder (RMSNorm, RoPE, grouped-query attention, SwiGLU) loaded from Hugging Face or random weights |
+| **API** | OpenAI-compatible `/v1/completions` and `/v1/chat/completions` with SSE streaming and `/metrics` |
+| **Correctness** | Greedy output equals `transformers` on SmolLM2-135M with chunked prefill and batched requests |
+| **Tests / CI** | pytest, ruff, offline benchmark sanity run, Docker build + HTTP smoke test on every PR |
 
 ## The problem it solves
 

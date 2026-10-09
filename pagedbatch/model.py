@@ -97,11 +97,7 @@ class ForwardBatch:
 
         decode = [i for i, n in enumerate(q_lens) if n == 1]
         prefill = [i for i, n in enumerate(q_lens) if n > 1]
-        groups = [
-            ForwardBatch._group(idx, q_lens, qsl, context_lens, block_tables, block_size, total)
-            for idx in (decode, prefill)
-            if idx
-        ]
+        groups = [ForwardBatch._group(idx, q_lens, qsl, context_lens, block_tables, block_size, total) for idx in (decode, prefill) if idx]
         to = lambda t: t.to(device)  # noqa: E731
         return ForwardBatch(
             input_ids=to(input_ids),
@@ -110,9 +106,7 @@ class ForwardBatch:
             query_start_loc=to(qsl),
             context_lens=to(context_lens),
             last_token_index=to(last_token_index),
-            groups=[
-                AttentionGroup(to(g.kv_slot_table), to(g.attn_mask), to(g.pad_index), to(g.valid_query), to(g.rows)) for g in groups
-            ],
+            groups=[AttentionGroup(to(g.kv_slot_table), to(g.attn_mask), to(g.pad_index), to(g.valid_query), to(g.rows)) for g in groups],
         )
 
     @staticmethod
