@@ -58,8 +58,10 @@ async def main_async(a: argparse.Namespace) -> dict:
         (await client.get(f"{a.url}/health")).raise_for_status()
         t0 = time.perf_counter()
         if a.rate:
+
             async def fire(p):
                 results.append(await one(client, a.url, p, a.max_tokens, a.temperature))
+
             tasks = []
             for p in prompts:
                 tasks.append(asyncio.create_task(fire(p)))

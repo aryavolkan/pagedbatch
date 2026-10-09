@@ -17,10 +17,19 @@ from pagedbatch.loader import load_model  # noqa: E402
 @pytest.fixture(scope="module")
 def hf_checkpoint(tmp_path_factory):
     cfg = LlamaConfig(
-        vocab_size=258, hidden_size=64, intermediate_size=128, num_hidden_layers=2,
-        num_attention_heads=4, num_key_value_heads=2, max_position_embeddings=512,
-        rms_norm_eps=1e-5, rope_theta=10000.0, tie_word_embeddings=True,
-        bos_token_id=256, eos_token_id=257, pad_token_id=257,
+        vocab_size=258,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=512,
+        rms_norm_eps=1e-5,
+        rope_theta=10000.0,
+        tie_word_embeddings=True,
+        bos_token_id=256,
+        eos_token_id=257,
+        pad_token_id=257,
     )
     torch.manual_seed(1234)
     hf = HFLlama(cfg).eval()
@@ -60,7 +69,7 @@ def test_greedy_generation_matches_hf_under_paging_chunking_and_batching(hf_chec
     for p in prompts:
         with torch.no_grad():
             out = hf.generate(torch.tensor([p]), max_new_tokens=12, do_sample=False, pad_token_id=257)
-        refs.append(out[0, len(p):].tolist())
+        refs.append(out[0, len(p) :].tolist())
     # block_size 2 and a 7-token step budget force many blocks per sequence and chunked prefill.
     engine = LLMEngine(model, cfg, tok, EngineConfig(block_size=2, num_blocks=200, max_num_seqs=3, max_num_batched_tokens=7, watermark=0.0))
     ids = [engine.add_request(prompt_token_ids=p, sampling=SamplingParams(max_tokens=12, temperature=0, ignore_eos=True)) for p in prompts]

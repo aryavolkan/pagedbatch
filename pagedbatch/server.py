@@ -208,8 +208,15 @@ def create_app(engine: LLMEngine, model_name: str = "pagedbatch") -> FastAPI:
 
             async def events() -> AsyncIterator[str]:
                 async for out in run(prompt_ids, sampling):
-                    yield _sse({"id": cid, "object": "text_completion", "created": created, "model": model_name,
-                                "choices": [{"index": 0, "text": out.text_delta, "finish_reason": out.finish_reason}]})
+                    yield _sse(
+                        {
+                            "id": cid,
+                            "object": "text_completion",
+                            "created": created,
+                            "model": model_name,
+                            "choices": [{"index": 0, "text": out.text_delta, "finish_reason": out.finish_reason}],
+                        }
+                    )
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(events(), media_type="text/event-stream")
@@ -219,9 +226,14 @@ def create_app(engine: LLMEngine, model_name: str = "pagedbatch") -> FastAPI:
             text += out.text_delta
             final = out
         assert final is not None
-        return {"id": cid, "object": "text_completion", "created": created, "model": model_name,
-                "choices": [{"index": 0, "text": text, "finish_reason": final.finish_reason}],
-                "usage": _usage(len(prompt_ids), len(final.output_token_ids))}
+        return {
+            "id": cid,
+            "object": "text_completion",
+            "created": created,
+            "model": model_name,
+            "choices": [{"index": 0, "text": text, "finish_reason": final.finish_reason}],
+            "usage": _usage(len(prompt_ids), len(final.output_token_ids)),
+        }
 
     @app.post("/v1/chat/completions")
     async def chat_completions(req: ChatCompletionRequest) -> Any:
@@ -233,11 +245,25 @@ def create_app(engine: LLMEngine, model_name: str = "pagedbatch") -> FastAPI:
         if req.stream:
 
             async def events() -> AsyncIterator[str]:
-                yield _sse({"id": cid, "object": "chat.completion.chunk", "created": created, "model": model_name,
-                            "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]})
+                yield _sse(
+                    {
+                        "id": cid,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model_name,
+                        "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
+                    }
+                )
                 async for out in run(prompt_ids, sampling):
-                    yield _sse({"id": cid, "object": "chat.completion.chunk", "created": created, "model": model_name,
-                                "choices": [{"index": 0, "delta": {"content": out.text_delta}, "finish_reason": out.finish_reason}]})
+                    yield _sse(
+                        {
+                            "id": cid,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model_name,
+                            "choices": [{"index": 0, "delta": {"content": out.text_delta}, "finish_reason": out.finish_reason}],
+                        }
+                    )
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(events(), media_type="text/event-stream")
@@ -247,8 +273,13 @@ def create_app(engine: LLMEngine, model_name: str = "pagedbatch") -> FastAPI:
             text += out.text_delta
             final = out
         assert final is not None
-        return {"id": cid, "object": "chat.completion", "created": created, "model": model_name,
-                "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": final.finish_reason}],
-                "usage": _usage(len(prompt_ids), len(final.output_token_ids))}
+        return {
+            "id": cid,
+            "object": "chat.completion",
+            "created": created,
+            "model": model_name,
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": final.finish_reason}],
+            "usage": _usage(len(prompt_ids), len(final.output_token_ids)),
+        }
 
     return app
